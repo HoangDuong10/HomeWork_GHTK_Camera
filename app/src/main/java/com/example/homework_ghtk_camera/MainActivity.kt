@@ -1,30 +1,30 @@
 package com.example.homework_ghtk_camera
 
-import android.content.ContentResolver
-import android.graphics.Bitmap
-import android.graphics.BitmapFactory
+import android.Manifest
+import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
-import android.widget.ImageView
+import android.util.Log
 import android.widget.Toast
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.annotation.OptIn
 import androidx.appcompat.app.AppCompatActivity
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.ExperimentalGetImage
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
-import androidx.camera.core.ImageCaptureException
+import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
-import androidx.core.view.ViewCompat
-import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.LifecycleOwner
 import com.example.homework_ghtk_camera.databinding.ActivityMainBinding
 import com.google.common.util.concurrent.ListenableFuture
-import com.google.mlkit.vision.common.internal.ImageUtils
-import java.io.File
+import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.text.TextRecognition
+import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
@@ -34,11 +34,31 @@ class MainActivity : AppCompatActivity() {
     private lateinit var cameraExecutor : ExecutorService
     private var camera: Camera? = null
     private var imageCapture: ImageCapture? = null
-    private lateinit var imageCaptured: ImageView
+
+
+    private val requestPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ){isGranted:Boolean ->
+        if(isGranted){
+            setUpCameraX()
+        }else{
+            Toast.makeText(this,"Tính năng cần được cho phép",Toast.LENGTH_LONG).show()
+            finish()
+        }
+
+    }
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
+        binding = ActivityMainBinding.inflate(layoutInflater)
+        setContentView(binding.root)
+        requestPermissionLauncher.launch(Manifest.permission.CAMERA)
+    }
+
     private fun setUpCameraX(){
         cameraExecutor = Executors.newSingleThreadExecutor()
         cameraProviderFuture = ProcessCameraProvider.getInstance(this)
-        cameraProviderFuture.addListener(Runnable {
+        cameraProviderFuture.addListener( {
             val cameraProvider = cameraProviderFuture.get()
             bindPreview(cameraProvider)
         },ContextCompat.getMainExecutor(this))
@@ -75,72 +95,47 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    val requestPermissionLauncher = registerForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ){isGranted:Boolean ->
-        if(isGranted){
-            setUpCameraX()
-        }else{
-            Toast.makeText(this,"Tính năng cần được cho phép",Toast.LENGTH_LONG).show()
-            finish()
-        }
-
-    }
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
-        binding = ActivityMainBinding.inflate(layoutInflater)
-        setContentView(binding.root)
-        ViewCompat.setOnApplyWindowInsetsListener(findViewById(R.id.main)) { v, insets ->
-            val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
-            v.setPadding(systemBars.left, systemBars.top, systemBars.right, systemBars.bottom)
-            insets
-        }
+    private val mTextRecognizer by lazy {
+        TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
     }
 
-    private fun getOutputDirectory(): File {
-        val mediaDir = externalMediaDirs.firstOrNull()?.let {
-            File(it, resources.getString(R.string.app_name)).apply { mkdirs() }
-        }
-        return mediaDir ?: filesDir
-    }
+    inner class ObjectDetectorImageAnalyzer : ImageAnalysis.Analyzer {
+//        private var hasShownInvalidUrlToast = false
+        @OptIn(ExperimentalGetImage::class)
+        override fun analyze(imageProxy: ImageProxy) {
+            val mediaImage = imageProxy.image
+            if (mediaImage != null) {
+                val image = InputImage.fromMediaImage(mediaImage, imageProxy.imageInfo.rotationDegrees)
 
-    private fun doCapture() {
-        val outputOptions = ImageCapture.OutputFileOptions.Builder(
-            File.createTempFile(
-                "temp",
-                ".jpg",
-                getOutputDirectory()
-            )
-        ).build()
-
-        imageCapture?.takePicture(outputOptions, cameraExecutor,
-            object : ImageCapture.OnImageSavedCallback {
-                override fun onError(error: ImageCaptureException) {
-                    // insert your code here.
-                    Toast.makeText(applicationContext, "Error capture", Toast.LENGTH_SHORT).show()
-                }
-
-                override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
-                    // insert your code here.
-                    val savedUri = outputFileResults.savedUri
-                    savedUri?.let {
-                        val bitmap = com.example.homework_ghtk_camera.ImageUtils.decodeBitmapFromUri(contentResolver, it)
-                        // Use the bitmap as needed (e.g., display in ImageView)
-                        runOnUiThread {
-                            imageCaptured.setImageBitmap(bitmap)
-
-
+                mTextRecognizer.process(image)
+                    .addOnSuccessListener { visionText ->
+                        // Xử lý văn bản nhận diện được
+                        val text = visionText.text
+                        try {
+                            val uri = Uri.parse(text)
+                            if (uri.scheme != null && uri.host != null) {
+                                val intent = Intent(Intent.ACTION_VIEW, uri)
+                                startActivity(intent)
+                            } else {
+                               binding.tvScan.text = text
+                            }
+                        } catch (e: Exception) {
+                            Log.e("TextRecognition", "${e.message}")
                         }
                     }
-                }
-            })
+                    .addOnFailureListener { e ->
+                        Log.e("TextRecognition", "Text recognition failed", e)
+                    }
+                    .addOnCompleteListener {
+                        imageProxy.close()
+                    }
+            } else {
+                imageProxy.close()
+            }
+        }
     }
-}
-
-object ImageUtils {
-    fun decodeBitmapFromUri(contentResolver: ContentResolver, uri: Uri): Bitmap {
-        val inputStream = contentResolver.openInputStream(uri)
-        return BitmapFactory.decodeStream(inputStream)
+    override fun onDestroy() {
+        super.onDestroy()
+        cameraExecutor.shutdown()
     }
 }
